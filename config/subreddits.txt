@@ -1,0 +1,15 @@
+# GM subreddit watchlist.
+# One subreddit per line, no r/ prefix required.
+sales
+RealEstate
+Construction
+freelance
+productivity
+Dentistry
+humanresources
+ecommerce
+accounting
+sysadmin
+electricians
+HVAC
+realtors
