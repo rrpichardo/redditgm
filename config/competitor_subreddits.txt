@@ -1,0 +1,24 @@
+# Competitor communities for benchmarking GM discussion themes.
+# One subreddit per line, no r/ prefix required.
+
+# Ford
+Ford
+f150
+Mustang
+
+# Stellantis
+Stellantis
+Jeep
+Dodge
+ram_trucks
+
+# Honda
+Honda
+
+# Hyundai/Kia
+Hyundai
+kia
+
+# Toyota
+Toyota
+ToyotaTacoma

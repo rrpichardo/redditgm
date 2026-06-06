@@ -1,0 +1,12 @@
+# GM brand, vehicle-line, workplace, and labor communities.
+# One subreddit per line, no r/ prefix required.
+Chevy
+Silverado
+camaro
+GeneralMotors
+GMC
+Chevrolet
+Cadillac
+Corvette
+Buick
+uaw
