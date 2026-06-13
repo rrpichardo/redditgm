@@ -128,10 +128,24 @@ def generate_sql(question: str) -> str:
     return raw
 
 
+_DANGEROUS_FN = re.compile(
+    r'\b(read_csv|read_csv_auto|read_parquet|read_json|read_json_auto|'
+    r'read_text|read_blob|glob|from_csv_auto|parquet_scan|scan_csv|copy)\b',
+    re.IGNORECASE,
+)
+
+
 def is_safe_sql(sql: str) -> bool:
-    """Reject anything that isn't a SELECT statement (guardrail)."""
-    first_word = sql.strip().split()[0].upper() if sql.strip() else ""
-    return first_word == "SELECT"
+    """Allow only SELECT statements that don't use DuckDB file/system functions."""
+    stripped = sql.strip()
+    if not stripped:
+        return False
+    first_word = stripped.split()[0].upper()
+    if first_word != "SELECT":
+        return False
+    if _DANGEROUS_FN.search(stripped):
+        return False
+    return True
 
 
 def run_sql(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[list, list[str]]:
