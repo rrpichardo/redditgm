@@ -15,6 +15,11 @@ data/
 state/
 runs/
 reports/
+analytics/
 *.csv
+!tests/fixtures/*.csv
 *.jsonl
 *.log
+*.duckdb
+*.faiss
+*.pkl
