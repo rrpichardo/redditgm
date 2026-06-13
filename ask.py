@@ -1,20 +1,13 @@
 """
 ask.py — Natural-language question → DuckDB SQL (text-to-SQL) + RAG evidence.
 
-Architecture:
-  1. Router LLM: classifies intent as COUNT | QUALITATIVE | BOTH
-  2. COUNT path: LLM writes DuckDB SQL → executed against labels + evidence_units
-  3. QUALITATIVE path: FAISS retrieve → make_context → LLM synthesizes
-  4. Answer = SQL numbers + RAG permalink evidence + caveats
+Library API:
+  from ask import answer, AnswerResult
+  result = answer("How many authors...", Run("gm"))
 
-Guardrails:
-  - SELECT-only (rejects any non-read SQL)
-  - Schema passed verbatim in prompt (no hallucinated columns)
-  - LLM explains but never invents numbers
-
-Run:
+CLI:
   .venv311/bin/python ask.py "How many unique authors complained about Silverado pain points?"
-  .venv311/bin/python ask.py --tag gm_vehicle_on_demand "What are people saying about EV range?"
+  .venv311/bin/python ask.py --tag gm "What are people saying about EV range?"
 """
 
 from __future__ import annotations
@@ -22,7 +15,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import duckdb
 from rich.console import Console
@@ -32,102 +27,11 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from rag_core import chat, load_index, retrieve, make_context
+from run_config import Run
 
 console = Console()
-DB_PATH = Path("analytics/redditgm.duckdb")
 
-# Schema passed verbatim to LLM — guardrail against column hallucination
-SCHEMA_DESCRIPTION = """
-Tables in the DuckDB database:
-
-evidence_units (
-    evidence_id  VARCHAR,   -- PK; format 'post_<id>' or 'comment_<id>'
-    source_type  VARCHAR,   -- 'post' or 'comment'
-    run_id       VARCHAR,
-    subreddit    VARCHAR,   -- e.g. 'Silverado', 'GMC', 'Chevy'
-    post_id      VARCHAR,
-    comment_id   VARCHAR,
-    author       VARCHAR,   -- '[deleted]' means removed
-    created_at   TIMESTAMP,
-    title        VARCHAR,
-    text         VARCHAR,
-    permalink    VARCHAR,
-    score        INTEGER
-)
-
-labels (
-    evidence_id    VARCHAR,  -- FK → evidence_units
-    brand          VARCHAR,  -- 'Chevy', 'GMC', 'Cadillac', 'Buick', 'GM', 'unknown'
-    model          VARCHAR,  -- 'Silverado', 'Tahoe', 'Sierra', etc.
-    powertrain     VARCHAR,  -- 'EV', 'ICE', 'PHEV', 'unknown'
-    is_pain_point  BOOLEAN,
-    pain_theme     VARCHAR,  -- see THEME_ENUM below
-    is_delight     BOOLEAN,
-    delight_theme  VARCHAR,
-    sentiment      VARCHAR,  -- 'positive', 'negative', 'neutral', 'mixed'
-    confidence     FLOAT
-)
-
-THEME_ENUM: transmission | reliability | dealer_service | pricing | infotainment |
-            battery_range | charging | build_quality | recall | warranty |
-            performance | comfort | other
-
-Rules you MUST follow when writing SQL:
-- Always JOIN labels l ON e.evidence_id = l.evidence_id
-- To count unique people, use COUNT(DISTINCT e.author)
-- Always filter out deleted authors: WHERE e.author != '[deleted]'
-- Use only columns listed above — do not invent column names
-- Output only the SQL query, no explanation, no markdown fences
-"""
-
-ROUTER_SYSTEM = """You classify the intent of a question about Reddit vehicle data.
-
-Output ONE of these three tokens only:
-  COUNT       — the answer is a number (how many, what share, top N, compare counts)
-  QUALITATIVE — the answer is narrative (what are people saying, summarize themes)
-  BOTH        — needs a number AND narrative examples
-
-Output only the token, nothing else."""
-
-SQL_SYSTEM = f"""You write DuckDB SQL queries for a Reddit vehicle analytics database.
-
-{SCHEMA_DESCRIPTION}
-
-Output only the SQL query. No markdown. No explanation."""
-
-ANSWER_SYSTEM = """You synthesize analytics results for a business audience.
-Present findings clearly. Lead with the number, then interpret it, then cite evidence.
-Be concise and honest — never invent numbers."""
-
-
-def classify_intent(question: str) -> str:
-    raw = chat(
-        messages=[
-            {"role": "system", "content": ROUTER_SYSTEM},
-            {"role": "user", "content": question},
-        ],
-        temperature=0.0,
-        max_tokens=10,
-    ).strip().upper()
-    if raw not in ("COUNT", "QUALITATIVE", "BOTH"):
-        return "BOTH"
-    return raw
-
-
-def generate_sql(question: str) -> str:
-    raw = chat(
-        messages=[
-            {"role": "system", "content": SQL_SYSTEM},
-            {"role": "user", "content": question},
-        ],
-        temperature=0.0,
-        max_tokens=400,
-    ).strip()
-    # Strip any accidental markdown fences
-    raw = re.sub(r"```sql|```", "", raw).strip()
-    return raw
-
-
+# Regex of DuckDB functions that can read from disk or shell — blocked by guardrail
 _DANGEROUS_FN = re.compile(
     r'\b(read_csv|read_csv_auto|read_parquet|read_json|read_json_auto|'
     r'read_text|read_blob|glob|from_csv_auto|parquet_scan|scan_csv|copy)\b',
@@ -148,6 +52,37 @@ def is_safe_sql(sql: str) -> bool:
     return True
 
 
+def classify_intent(question: str) -> str:
+    # Prompts come from settings, not module-level constants
+    from settings import get_settings
+    raw = chat(
+        messages=[
+            {"role": "system", "content": get_settings().router_prompt},
+            {"role": "user", "content": question},
+        ],
+        temperature=0.0,
+        max_tokens=10,
+    ).strip().upper()
+    if raw not in ("COUNT", "QUALITATIVE", "BOTH"):
+        return "BOTH"
+    return raw
+
+
+def generate_sql(question: str) -> str:
+    from settings import get_settings
+    raw = chat(
+        messages=[
+            {"role": "system", "content": get_settings().sql_prompt},
+            {"role": "user", "content": question},
+        ],
+        temperature=0.0,
+        max_tokens=400,
+    ).strip()
+    # Strip any accidental markdown fences
+    raw = re.sub(r"```sql|```", "", raw).strip()
+    return raw
+
+
 def run_sql(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[list, list[str]]:
     """Execute SQL and return (rows, column_names)."""
     result = con.execute(sql)
@@ -156,32 +91,11 @@ def run_sql(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[list, list[str]]:
     return rows, cols
 
 
-def display_sql_results(sql: str, rows: list, cols: list[str]) -> str:
-    """Pretty-print SQL and results; return a text summary."""
-    console.print(Syntax(sql, "sql", theme="monokai", word_wrap=True))
-
-    if not rows:
-        console.print("[dim]Query returned no rows.[/]")
-        return "No data found."
-
-    table = Table(border_style="dim", show_header=True, header_style="bold cyan")
-    for col in cols:
-        table.add_column(col)
-    for row in rows[:20]:  # cap display at 20
-        table.add_row(*[str(v) for v in row])
-    console.print(table)
-
-    # Build a compact text summary for the answer LLM
-    lines = [" | ".join(cols)]
-    for row in rows:
-        lines.append(" | ".join(str(v) for v in row))
-    return "\n".join(lines)
-
-
 def qualitative_answer(question: str, context: str) -> str:
+    from settings import get_settings
     return chat(
         messages=[
-            {"role": "system", "content": ANSWER_SYSTEM},
+            {"role": "system", "content": get_settings().answer_prompt},
             {"role": "user", "content": f"Question: {question}\n\nEvidence:\n{context}"},
         ],
         temperature=0.3,
@@ -190,9 +104,10 @@ def qualitative_answer(question: str, context: str) -> str:
 
 
 def full_answer(question: str, sql_summary: str, context: str) -> str:
+    from settings import get_settings
     return chat(
         messages=[
-            {"role": "system", "content": ANSWER_SYSTEM},
+            {"role": "system", "content": get_settings().answer_prompt},
             {"role": "user", "content": (
                 f"Question: {question}\n\n"
                 f"SQL Results:\n{sql_summary}\n\n"
@@ -204,97 +119,154 @@ def full_answer(question: str, sql_summary: str, context: str) -> str:
     )
 
 
+def _rows_to_summary(rows: Optional[list], cols: Optional[list[str]]) -> str:
+    """Convert SQL result rows into a compact text table for the LLM."""
+    if not rows or not cols:
+        return "No data found."
+    lines = [" | ".join(cols)]
+    lines.extend(" | ".join(str(v) for v in row) for row in rows)
+    return "\n".join(lines)
+
+
+@dataclass
+class AnswerResult:
+    question: str
+    intent: str           # COUNT | QUALITATIVE | BOTH
+    sql: Optional[str]
+    rows: Optional[list]
+    cols: Optional[list[str]]
+    answer_text: str
+    sources: list[dict] = field(default_factory=list)
+
+
+def answer(question: str, run: Run) -> AnswerResult:
+    """
+    Route question through intent classifier → SQL and/or RAG → synthesize.
+    Returns a structured AnswerResult for programmatic use (Streamlit, CLI, tests).
+    Raises FileNotFoundError if the database is needed but missing.
+    Raises ValueError if the generated SQL fails the safety guardrail.
+    """
+    from settings import get_settings
+    s = get_settings()
+
+    intent = classify_intent(question)
+    sql: Optional[str] = None
+    rows: Optional[list] = None
+    cols: Optional[list[str]] = None
+    context = ""
+    sources: list[dict] = []
+
+    # COUNT path: generate SQL and execute against DuckDB
+    if intent in ("COUNT", "BOTH"):
+        if not run.db_path.exists():
+            raise FileNotFoundError(
+                f"Database not found at {run.db_path}. Run build_analytics_db.py first."
+            )
+        sql = generate_sql(question)
+        if not is_safe_sql(sql):
+            raise ValueError(f"SQL guardrail rejected: {sql!r}")
+        con = duckdb.connect(str(run.db_path), read_only=True)
+        rows, cols = run_sql(con, sql)
+        con.close()
+
+    # QUALITATIVE path: FAISS retrieve → make_context
+    if intent in ("QUALITATIVE", "BOTH"):
+        if not run.index_path.exists():
+            # Graceful fallback — no crash, just empty context
+            context = ""
+        else:
+            index, chunks = load_index(run.index_path)
+            retrieved = retrieve(question, index, chunks, top_k=s.ask_top_k)
+            context = make_context(retrieved)
+            sources = retrieved
+
+    # Synthesize final answer based on what data we have
+    if intent == "COUNT" and not context:
+        answer_text = full_answer(question, _rows_to_summary(rows, cols), "")
+    elif intent == "QUALITATIVE":
+        if not context:
+            answer_text = "No RAG index found. Run build_rag_index.py to enable evidence retrieval."
+        else:
+            answer_text = qualitative_answer(question, context)
+    else:
+        answer_text = full_answer(question, _rows_to_summary(rows, cols), context)
+
+    return AnswerResult(
+        question=question,
+        intent=intent,
+        sql=sql,
+        rows=rows,
+        cols=cols,
+        answer_text=answer_text,
+        sources=sources,
+    )
+
+
+def _display_result(result: AnswerResult) -> None:
+    """Print an AnswerResult to the terminal using Rich."""
+    console.print(f"[dim]Intent:[/] [bold]{result.intent}[/]\n")
+
+    if result.sql:
+        console.print(Panel("SQL Query", border_style="dim", padding=(0, 1)))
+        console.print(Syntax(result.sql, "sql", theme="monokai", word_wrap=True))
+
+        if result.rows is not None:
+            if not result.rows:
+                console.print("[dim]Query returned no rows.[/]")
+            else:
+                table = Table(border_style="dim", show_header=True, header_style="bold cyan")
+                for col in (result.cols or []):
+                    table.add_column(col)
+                for row in result.rows[:20]:  # cap display at 20 rows
+                    table.add_row(*[str(v) for v in row])
+                console.print(table)
+
+    console.print(Panel(
+        Markdown(result.answer_text),
+        title="[bold green]Answer[/]",
+        border_style="green",
+        padding=(1, 2),
+    ))
+
+    if result.sources:
+        source_table = Table(title="Sources", border_style="dim", show_header=True)
+        source_table.add_column("Subreddit", style="cyan")
+        source_table.add_column("Permalink", style="dim")
+        for chunk in result.sources[:5]:
+            source_table.add_row(
+                f"r/{chunk.get('subreddit', '')}",
+                chunk.get("permalink", ""),
+            )
+        console.print(source_table)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Ask a plain-English question about GM Reddit data.")
     p.add_argument("question", nargs="?", help="Your question in plain English")
-    p.add_argument("--db-path", default=str(DB_PATH))
-    p.add_argument("--tag", default="gm_vehicle_on_demand", help="RAG index tag")
-    p.add_argument("--top-k", type=int, default=5, help="RAG chunks to retrieve")
+    p.add_argument("--tag", default="gm_vehicle_on_demand", help="Analysis run tag")
     args = p.parse_args()
 
     if not args.question:
         console.print("[yellow]Usage:[/] python ask.py \"Your question here\"")
         sys.exit(1)
 
-    db_path = Path(args.db_path)
-    index_path = Path("state") / "rag" / args.tag
-    question = args.question
+    run = Run(args.tag)
 
     console.print(Panel.fit(
-        f"[bold cyan]GM Reddit Analytics — Ask[/]\n"
-        f"[white]{question}[/]",
-        border_style="cyan"
+        f"[bold cyan]GM Reddit Analytics — Ask[/]\n[white]{args.question}[/]",
+        border_style="cyan",
     ))
 
-    # Step 1: classify intent
-    with console.status("[cyan]Analyzing question...[/]"):
-        intent = classify_intent(question)
-    console.print(f"[dim]Intent:[/] [bold]{intent}[/]\n")
-
-    sql_summary = ""
-    context = ""
-
-    # Step 2a: COUNT path — text-to-SQL
-    if intent in ("COUNT", "BOTH"):
-        if not db_path.exists():
-            console.print(f"[red]✗[/] Database not found at {db_path}. Run build_analytics_db.py first.")
-            sys.exit(1)
-
-        console.print(Panel("Generating SQL...", border_style="dim", padding=(0, 1)))
-        with console.status("[cyan]Writing SQL...[/]"):
-            sql = generate_sql(question)
-
-        if not is_safe_sql(sql):
-            console.print(f"[red]✗ Guardrail: rejected non-SELECT SQL:[/]\n{sql}")
-            sys.exit(1)
-
-        with console.status("[cyan]Executing query...[/]"):
-            con = duckdb.connect(str(db_path), read_only=True)
-            rows, cols = run_sql(con, sql)
-            con.close()
-
-        sql_summary = display_sql_results(sql, rows, cols)
-
-    # Step 2b: QUALITATIVE path — RAG retrieval
-    if intent in ("QUALITATIVE", "BOTH"):
-        if not index_path.exists():
-            console.print(f"[yellow]⚠[/] RAG index not found at {index_path}. Skipping evidence retrieval.")
-        else:
-            with console.status("[cyan]Retrieving evidence...[/]"):
-                index, chunks = load_index(index_path)
-                retrieved = retrieve(question, index, chunks, top_k=args.top_k)
-                context = make_context(retrieved)
-
-            console.print(f"[dim]Retrieved {len(retrieved)} evidence chunks[/]")
-
-    # Step 3: synthesize answer
-    console.print()
-    with console.status("[cyan]Synthesizing answer...[/]"):
-        if intent == "COUNT" and not context:
-            answer = full_answer(question, sql_summary, "")
-        elif intent == "QUALITATIVE":
-            answer = qualitative_answer(question, context)
-        else:
-            answer = full_answer(question, sql_summary, context)
-
-    console.print(Panel(
-        Markdown(answer),
-        title="[bold green]Answer[/]",
-        border_style="green",
-        padding=(1, 2),
-    ))
-
-    # Show source permalinks
-    if context and retrieved:
-        source_table = Table(title="Sources", border_style="dim", show_header=True)
-        source_table.add_column("Subreddit", style="cyan")
-        source_table.add_column("Permalink", style="dim")
-        for chunk in retrieved[:5]:
-            source_table.add_row(
-                f"r/{chunk.get('subreddit', '')}",
-                chunk.get("permalink", ""),
-            )
-        console.print(source_table)
+    try:
+        with console.status("[cyan]Analyzing...[/]"):
+            result = answer(args.question, run)
+        _display_result(result)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] {exc}")
+        sys.exit(1)
+    except ValueError as exc:
+        console.print(f"[red]✗ Guardrail:[/] {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
