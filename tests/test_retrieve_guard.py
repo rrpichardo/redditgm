@@ -53,7 +53,7 @@ def test_retrieve_when_top_k_exceeds_index_size(monkeypatch):
         assert r in chunks, f"Result {r} not in original chunks"
 
 
-def test_retrieve_returns_empty_for_empty_chunks(monkeypatch):
+def test_retrieve_returns_empty_for_empty_index(monkeypatch):
     """
     Empty chunks list returns [] immediately — FAISS search on empty index would crash
     without the early-exit guard.
