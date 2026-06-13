@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -10,7 +9,7 @@ import pytest
 
 def test_defaults_load_without_json(monkeypatch, tmp_path):
     """When no settings.json exists, get_settings() returns defaults."""
-    import importlib, sys
+    import sys
     # Patch SETTINGS_PATH before import
     monkeypatch.chdir(tmp_path)
     if "settings" in sys.modules:

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 # default path; tests override this directly on the module
-SETTINGS_PATH = Path("runtime/settings.json")
+SETTINGS_PATH = Path("runtime/settings.json")  # intentionally module-level so tests can override it
 
 # canonical theme enumerations used by the classifier prompt
 PAIN_THEMES_DEFAULT: list[str] = [
@@ -124,8 +124,8 @@ class Settings:
     max_tokens: int = 1024
 
     # taxonomy lists used by the classifier
-    pain_themes: list = field(default_factory=lambda: list(PAIN_THEMES_DEFAULT))
-    delight_themes: list = field(default_factory=lambda: list(DELIGHT_THEMES_DEFAULT))
+    pain_themes: list[str] = field(default_factory=lambda: list(PAIN_THEMES_DEFAULT))
+    delight_themes: list[str] = field(default_factory=lambda: list(DELIGHT_THEMES_DEFAULT))
 
     # pipeline control
     classify_limit: Optional[int] = None   # None = classify everything
