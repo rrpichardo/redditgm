@@ -98,6 +98,29 @@ Outputs are written to:
 - `runtime/gm_vehicle_on_demand/reports/analytics/dashboard.html`
 - `runtime/gm_vehicle_on_demand/reports/analytics/*.png`
 
+## Run Streamlit App
+
+```bash
+.venv311/bin/streamlit run app.py
+```
+
+The app uses the active run tag, derives counts from the selected CSV/DuckDB
+run, and keeps the dashboard, Q&A, settings, and pipeline controls on that one
+active dataset.
+
+The Data page is cumulative by default. If you load a one-day CSV and later load
+a wider three-day CSV into the same tag, the app appends into the run's master
+CSV and deduplicates by `post_id` / `comment_id` before loading DuckDB. Use
+`Reset this run before loading` only when you intentionally want to replace that
+tag's stored data or switch between combined and split CSV formats.
+
+The Settings page includes class-style model presets for the Lab 1/Lab 2/Lab 3
+patterns, including OpenRouter `llama-4-scout`, `gpt-oss-120b`,
+`google/gemma-4-31b-it`, OpenAI direct `gpt-4o-mini`, Anthropic Claude, and
+Jetstream `llama-4-scout`. RAG indexing follows the Lab 3 shape: one text chunk
+per post, OpenAI `text-embedding-3-large` embeddings, FAISS `IndexFlatIP`, and a
+top-k retrieved-evidence control in Q&A.
+
 ## Activity Screen
 
 Before choosing subreddits for a proposal, check actual activity instead of

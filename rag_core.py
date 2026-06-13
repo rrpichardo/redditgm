@@ -28,11 +28,14 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 JETSTREAM_API_KEY = os.getenv("JETSTREAM_API_KEY", "")
 JETSTREAM_BASE_URL = os.getenv("JETSTREAM_BASE_URL", "")
 
-# ==== MODEL SWITCH seed (#-style, like the labs; runtime/settings.json wins) ====
-GENERATION_MODEL = load_settings()["generation_model"]    # OpenRouter (default)
+# ==== MODEL SWITCH seed (#-style, like the class labs; runtime/settings.json wins) ====
+GENERATION_MODEL = load_settings()["generation_model"]
+# GENERATION_MODEL = "llama-4-scout"                      # Lab 2/OpenRouter
+# GENERATION_MODEL = "gpt-oss-120b"                       # Lab 2/3/OpenRouter
+# GENERATION_MODEL = "google/gemma-4-31b-it"              # Lab 2/OpenRouter
 # GENERATION_MODEL = "gpt-4o-mini"                        # OpenAI direct
 # GENERATION_MODEL = "claude-3-5-haiku-20241022"          # Anthropic / Claude
-# GENERATION_MODEL = "jetstream/meta-llama/llama-3.1-70b-instruct"  # Jetstream
+# GENERATION_MODEL = "llama-4-scout"                      # Jetstream when provider=jetstream
 
 EMBEDDING_MODEL = load_settings()["embedding_model"]  # OpenAI; 3072 dims default
 
@@ -61,6 +64,8 @@ def _provider_for_model(model: str, settings: dict[str, Any]) -> str:
         return "anthropic"
     if model.startswith("jetstream/"):
         return "jetstream"
+    if model in {"llama-4-scout", "gpt-oss-120b", "gemma-4-31b-it"}:
+        return "openrouter"
     if model.startswith(("openai/", "meta-llama/", "anthropic/", "google/", "mistral/")):
         return "openrouter"
     return "openai"
@@ -78,11 +83,11 @@ def _provider_model_name(model: str, provider: str) -> str:
 
 def _provider_base_url(provider: str, settings: dict[str, Any]) -> str:
     provider_settings = settings["providers"].get(provider, {})
+    env_name = provider_settings.get("base_url_env")
+    if env_name and os.getenv(env_name):
+        return os.getenv(env_name, "")
     if "base_url" in provider_settings:
         return provider_settings["base_url"]
-    env_name = provider_settings.get("base_url_env")
-    if env_name:
-        return os.getenv(env_name, "")
     return ""
 
 
@@ -275,8 +280,8 @@ def chunk_csv_to_posts(data_dir: str | Path) -> list[dict[str, Any]]:
 # Embeddings — Ported from Lab 3 (embed_texts)
 # ---------------------------------------------------------------------------
 
-def embed_texts(texts: list[str], batch_size: int = 100) -> np.ndarray:
-    """Embed a list of strings using OpenAI text-embedding-3-large."""
+def embed_texts(texts: list[str], batch_size: int = 50) -> np.ndarray:
+    """Embed text blocks in batches, following the Lab 3 rating-agent pattern."""
     client = _get_embed_client()
     embedding_model = current_embedding_model()
     all_embeddings = []

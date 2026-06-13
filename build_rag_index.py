@@ -74,7 +74,7 @@ def main() -> None:
         sys.exit(1)
 
     texts = [c["text"] for c in chunks]
-    batch_size = 100
+    batch_size = 50
     batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
 
     import numpy as np

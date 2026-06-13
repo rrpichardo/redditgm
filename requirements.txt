@@ -12,3 +12,4 @@ python-dotenv>=1.0.0
 json-repair>=0.28.0
 pytest>=8.0.0
 rich>=13.7.0
+streamlit>=1.35.0

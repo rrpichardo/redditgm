@@ -129,6 +129,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "api_key_env": "ANTHROPIC_API_KEY",
         },
         "jetstream": {
+            "base_url": "https://llm.jetstream-cloud.org/api",
             "base_url_env": "JETSTREAM_BASE_URL",
             "api_key_env": "JETSTREAM_API_KEY",
         },

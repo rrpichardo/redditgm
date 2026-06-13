@@ -1,5 +1,5 @@
 """
-report.py — Generate a fixed analytics report from the DuckDB labels.
+report.py — Generate the standard analytics report from the DuckDB labels.
 
 Outputs:
   reports/<tag>/analytics/report.md     — markdown summary

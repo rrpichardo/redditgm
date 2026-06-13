@@ -14,6 +14,7 @@ import csv
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 import pytest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -351,3 +352,80 @@ def test_combined_csv_ingestion_uses_distinct_post_and_comment_ids(tmp_path):
     assert counts["input_comments"] == 2
     assert counts["posts"] == 2
     assert counts["comments"] == 2
+
+
+def _combined_upload_row(post_id: str, comment_id: str = "", *, title: str | None = None) -> dict[str, str]:
+    return {
+        "run_id": "run_1",
+        "post_id": post_id,
+        "post_subreddit": "Silverado",
+        "post_title": title or f"Post {post_id}",
+        "post_author": f"author_{post_id}",
+        "post_score": "5",
+        "post_created_at": "2026-06-01T00:00:00+00:00",
+        "post_content": f"Content for {post_id}",
+        "post_selftext": f"Content for {post_id}",
+        "post_permalink": f"/r/Silverado/comments/{post_id}/",
+        "comment_rank": "1" if comment_id else "",
+        "comment_id": comment_id,
+        "comment_author": f"author_{comment_id}" if comment_id else "",
+        "comment_score": "2" if comment_id else "",
+        "comment_body": f"Comment {comment_id}" if comment_id else "",
+        "comment_permalink": f"/r/Silverado/comments/{post_id}/{comment_id}/" if comment_id else "",
+    }
+
+
+def test_cumulative_combined_upload_dedupes_overlapping_windows(tmp_path):
+    from build_analytics_db import build_db
+    from csv_store import merge_upload_frames
+
+    data_dir = tmp_path / "data"
+    db_path = tmp_path / "analytics.duckdb"
+
+    first_window = pd.DataFrame([
+        _combined_upload_row("p1", "c1"),
+        _combined_upload_row("p2"),
+    ])
+    first_stats = merge_upload_frames(
+        {"combined": ("day_1.csv", b"", first_window)},
+        data_dir,
+        reset=False,
+    )
+    first_counts = build_db(data_dir, db_path, reset=True)
+
+    second_window = pd.DataFrame([
+        _combined_upload_row("p1", "c1", title="Post p1 updated"),
+        _combined_upload_row("p1", "c2"),
+        _combined_upload_row("p3"),
+    ])
+    second_stats = merge_upload_frames(
+        {"combined": ("last_3_days.csv", b"", second_window)},
+        data_dir,
+        reset=False,
+    )
+    second_counts = build_db(data_dir, db_path, reset=False)
+    stored = pd.read_csv(data_dir / "gm_posts_with_comments.csv", dtype=str, keep_default_na=False)
+
+    assert first_stats[0]["stored_rows"] == 2
+    assert first_counts["posts"] == 2
+    assert first_counts["comments"] == 1
+
+    assert second_stats[0]["existing_rows"] == 2
+    assert second_stats[0]["incoming_rows"] == 3
+    assert second_stats[0]["stored_rows"] == 4
+    assert second_stats[0]["duplicate_rows_removed"] == 1
+    assert len(stored) == 4
+    assert second_counts["posts"] == 3
+    assert second_counts["comments"] == 2
+
+
+def test_lab_style_model_names_route_to_openrouter_by_default():
+    from rag_core import _provider_for_model
+    from settings import load_settings
+
+    settings = load_settings()
+    settings["generation_provider"] = "auto"
+
+    assert _provider_for_model("llama-4-scout", settings) == "openrouter"
+    assert _provider_for_model("gpt-oss-120b", settings) == "openrouter"
+    assert _provider_for_model("google/gemma-4-31b-it", settings) == "openrouter"
