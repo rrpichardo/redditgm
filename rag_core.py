@@ -25,34 +25,42 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 JETSTREAM_API_KEY = os.getenv("JETSTREAM_API_KEY", "")
 
-# ==== MODEL SWITCH (#-style, like the labs) ====
-GENERATION_MODEL = "openai/gpt-4o-mini"                   # OpenRouter (default)
-# GENERATION_MODEL = "gpt-4o-mini"                        # OpenAI direct
-# GENERATION_MODEL = "claude-3-5-haiku-20241022"          # Anthropic / Claude
-# GENERATION_MODEL = "meta-llama/llama-3.1-70b-instruct"  # Jetstream / open-source
-
-EMBEDDING_MODEL = "text-embedding-3-large"  # OpenAI; 3072 dims, best accuracy
-
 # Clients are instantiated lazily on first use so importing this module
 # without API keys (e.g. in tests) doesn't raise an error.
-_gen_client: OpenAI | None = None
+
+# Per-model client cache — rebuilt automatically when model string changes
+_gen_client_cache: dict[str, OpenAI] = {}
 _embed_client: OpenAI | None = None
 
 # Tokenizer for the embedding model
 _enc = tiktoken.get_encoding("cl100k_base")
 
 
-def _get_gen_client() -> OpenAI:
-    global _gen_client
-    if _gen_client is None:
-        is_openrouter = GENERATION_MODEL.startswith(
-            ("openai/", "meta-llama/", "anthropic/", "google/", "mistral/")
-        )
-        _gen_client = OpenAI(
-            api_key=OPENROUTER_API_KEY if is_openrouter else OPENAI_API_KEY,
-            base_url="https://openrouter.ai/api/v1" if is_openrouter else "https://api.openai.com/v1",
-        )
-    return _gen_client
+def _build_gen_client(model: str) -> OpenAI:
+    """Dispatch to the right provider based on model id format."""
+    # OpenRouter: slash-namespaced (openai/gpt-4o-mini, anthropic/claude-3-5-haiku, etc.)
+    _openrouter_prefixes = ("openai/", "meta-llama/", "anthropic/", "google/", "mistral/", "cohere/")
+    if any(model.startswith(p) for p in _openrouter_prefixes):
+        return OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
+
+    # Bare Claude IDs (claude-3-5-haiku-20241022) — route through OpenRouter with anthropic/ prefix
+    if model.startswith("claude-"):
+        return OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
+
+    # Jetstream: any model when JETSTREAM_BASE_URL env var is configured
+    jetstream_url = os.getenv("JETSTREAM_BASE_URL", "")
+    if jetstream_url and JETSTREAM_API_KEY:
+        return OpenAI(api_key=JETSTREAM_API_KEY, base_url=jetstream_url)
+
+    # Default: OpenAI direct
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+
+def _get_gen_client(model: str) -> OpenAI:
+    """Return a cached client for this model, building one if needed."""
+    if model not in _gen_client_cache:
+        _gen_client_cache[model] = _build_gen_client(model)
+    return _gen_client_cache[model]
 
 
 def _get_embed_client() -> OpenAI:
@@ -133,12 +141,15 @@ def chunk_csv_to_posts(data_dir: str | Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def embed_texts(texts: list[str], batch_size: int = 100) -> np.ndarray:
-    """Embed a list of strings using OpenAI text-embedding-3-large."""
+    """Embed a list of strings using the configured embedding model."""
+    from settings import get_settings
+    # Read model from settings so it can be changed without touching this file
+    model = get_settings().embedding_model
     client = _get_embed_client()
     all_embeddings = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        response = client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+        response = client.embeddings.create(model=model, input=batch)
         batch_emb = [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
         all_embeddings.extend(batch_emb)
     return np.array(all_embeddings, dtype="float32")
@@ -189,10 +200,16 @@ def retrieve(query: str, index, chunks: list[dict], top_k: int = 5) -> list[dict
     """Embed the query and return the top-k most similar chunks."""
     import faiss
 
+    # Early exit: FAISS search on an empty index crashes; nothing to return anyway
+    if not chunks:
+        return []
+
     q_emb = embed_texts([query])
     faiss.normalize_L2(q_emb)
     _scores, indices = index.search(q_emb, top_k)
-    return [chunks[i] for i in indices[0] if i < len(chunks)]
+    # FAISS fills extra slots with -1 when top_k > index size — guard against that
+    # (without `0 <=`, Python's negative indexing silently wraps to the last chunk)
+    return [chunks[i] for i in indices[0] if 0 <= i < len(chunks)]
 
 
 def make_context(retrieved: list[dict]) -> str:
@@ -218,15 +235,27 @@ def make_context(retrieved: list[dict]) -> str:
 def chat(
     messages: list[dict[str, str]],
     model: str | None = None,
-    temperature: float = 0.0,
-    max_tokens: int = 1024,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """Call the generation model and return the response text."""
-    chosen_model = model or GENERATION_MODEL
-    response = _get_gen_client().chat.completions.create(
-        model=chosen_model,
+    from settings import get_settings
+    s = get_settings()
+
+    # Caller can override any param; fall back to settings values
+    chosen_model = model or s.generation_model
+    t = temperature if temperature is not None else s.temperature
+    mt = max_tokens if max_tokens is not None else s.max_tokens
+
+    # Bare Claude IDs need the anthropic/ prefix for OpenRouter routing
+    routed_model = chosen_model
+    if chosen_model.startswith("claude-") and "/" not in chosen_model:
+        routed_model = f"anthropic/{chosen_model}"
+
+    response = _get_gen_client(chosen_model).chat.completions.create(
+        model=routed_model,
         messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
+        temperature=t,
+        max_tokens=mt,
     )
     return response.choices[0].message.content or ""
