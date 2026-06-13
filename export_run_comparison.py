@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from run_config import RunPaths
+from settings import load_settings
+
 
 CSV_FILES = [
     "gm_posts.csv",
@@ -20,11 +23,13 @@ CSV_FILES = [
 
 
 def parse_args() -> argparse.Namespace:
+    settings = load_settings()
     parser = argparse.ArgumentParser(
         description="Export historical and new rows for a selected run_id."
     )
-    parser.add_argument("--data-dir", default="data/gm_vehicle_on_demand")
-    parser.add_argument("--runs-dir", default="runs/gm_vehicle_on_demand")
+    parser.add_argument("--tag", default=settings["active_tag"])
+    parser.add_argument("--data-dir", default=None)
+    parser.add_argument("--runs-dir", default=None)
     parser.add_argument(
         "--run-id",
         default="",
@@ -32,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--out-dir",
-        default="reports/run_comparison",
+        default=None,
         help="Directory where comparison files should be written.",
     )
     return parser.parse_args()
@@ -124,8 +129,10 @@ def split_csv_by_run_id(source: Path, output_root: Path, run_id: str) -> dict[st
 
 def main() -> None:
     args = parse_args()
-    data_dir = Path(args.data_dir)
-    runs_dir = Path(args.runs_dir)
+    run = RunPaths.resolve(args.tag, data_dir=args.data_dir)
+    data_dir = run.data_dir
+    runs_dir = Path(args.runs_dir) if args.runs_dir else run.runs_dir
+    out_dir = Path(args.out_dir) if args.out_dir else run.root / "reports" / "comparison"
     run_id = args.run_id
     selected_summary = None
 
@@ -137,7 +144,7 @@ def main() -> None:
         if summary_path.exists():
             selected_summary = load_run_summary(summary_path)
 
-    output_root = Path(args.out_dir) / run_id
+    output_root = out_dir / run_id
     file_summaries = {}
     for filename in CSV_FILES:
         file_summaries[filename] = split_csv_by_run_id(data_dir / filename, output_root, run_id)

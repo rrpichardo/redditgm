@@ -27,6 +27,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from run_config import RunPaths
+from settings import load_settings
+
 console = Console()
 DB_PATH = Path("analytics/redditgm.duckdb")
 
@@ -196,11 +199,11 @@ def query_summary(con) -> dict:
     total = con.execute("SELECT COUNT(*) FROM evidence_units").fetchone()[0]
     labeled = con.execute("SELECT COUNT(*) FROM labels").fetchone()[0]
     pain_pct_row = con.execute("""
-        SELECT ROUND(100.0 * SUM(CASE WHEN is_pain_point THEN 1 ELSE 0 END) / COUNT(*), 1)
+        SELECT COALESCE(ROUND(100.0 * SUM(CASE WHEN is_pain_point THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1), 0)
         FROM labels
     """).fetchone()
     delight_pct_row = con.execute("""
-        SELECT ROUND(100.0 * SUM(CASE WHEN is_delight THEN 1 ELSE 0 END) / COUNT(*), 1)
+        SELECT COALESCE(ROUND(100.0 * SUM(CASE WHEN is_delight THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1), 0)
         FROM labels
     """).fetchone()
 
@@ -253,48 +256,39 @@ def write_markdown(summary: dict, out_dir: Path) -> Path:
     return out
 
 
-def write_html_dashboard(summary: dict, out_dir: Path) -> Path:
+def write_html_dashboard(summary: dict, out_dir: Path, con) -> Path:
     """Interactive dark HTML dashboard with Chart.js (animated, engaging, clear)."""
-    # Pull data for JS charts
-    import duckdb as _duck
-
-    # We can't pass `con` here so we re-open it — this function is called after charting
-    db_path = DB_PATH  # module-level fallback; overridden in main
-
     pain_themes_data = []
     brand_sentiment_data = {}
     sentiment_data = []
     ev_ice_data = []
 
     try:
-        _con = _duck.connect(str(db_path), read_only=True)
-
-        sentiment_data = _con.execute("""
+        sentiment_data = con.execute("""
             SELECT sentiment, COUNT(*) FROM labels WHERE sentiment IS NOT NULL
             GROUP BY sentiment ORDER BY COUNT(*) DESC
         """).fetchall()
 
-        pain_themes_data = _con.execute("""
+        pain_themes_data = con.execute("""
             SELECT pain_theme, COUNT(*) FROM labels
             WHERE is_pain_point = TRUE AND pain_theme IS NOT NULL
             GROUP BY pain_theme ORDER BY COUNT(*) DESC LIMIT 8
         """).fetchall()
 
-        brand_rows = _con.execute("""
+        brand_rows = con.execute("""
             SELECT brand, sentiment, COUNT(*) FROM labels
             WHERE brand NOT IN ('unknown', 'GM') AND sentiment IS NOT NULL
             GROUP BY brand, sentiment ORDER BY brand
         """).fetchall()
 
-        ev_ice_data = _con.execute("""
+        ev_ice_data = con.execute("""
             SELECT powertrain,
                 SUM(CASE WHEN is_pain_point THEN 1 ELSE 0 END),
                 SUM(CASE WHEN is_delight THEN 1 ELSE 0 END)
             FROM labels WHERE powertrain IN ('EV', 'ICE', 'PHEV') GROUP BY powertrain
         """).fetchall()
-
-        _con.close()
     except Exception:
+        brand_rows = []
         pass
 
     # Serialize to JS
@@ -410,7 +404,7 @@ def write_html_dashboard(summary: dict, out_dir: Path) -> Path:
 <body>
 <header>
   <h1>GM Reddit Analytics</h1>
-  <span>{summary["labeled"]:,} posts labeled &nbsp;·&nbsp; {summary["total"]:,} total evidence units</span>
+  <span>{summary["labeled"]:,} evidence units labeled &nbsp;·&nbsp; {summary["total"]:,} total evidence units</span>
 </header>
 
 <div class="stat-row" style="padding-top:24px">
@@ -563,15 +557,18 @@ const anim = {{ duration: 700, easing: 'easeOutQuart' }};
 def main() -> None:
     global DB_PATH
 
+    settings = load_settings()
     p = argparse.ArgumentParser(description="Generate GM Reddit analytics report.")
-    p.add_argument("--db-path", default=str(DB_PATH))
-    p.add_argument("--tag", default="gm_vehicle_on_demand")
+    p.add_argument("--tag", default=settings["active_tag"])
+    p.add_argument("--db-path", default=None)
+    p.add_argument("--report-dir", default=None)
     args = p.parse_args()
 
-    db_path = Path(args.db_path)
-    DB_PATH = db_path  # update module global so dashboard can re-open it
+    run = RunPaths.resolve(args.tag, db_path=args.db_path, report_dir=args.report_dir)
+    db_path = run.db_path
+    DB_PATH = db_path
 
-    out_dir = Path("reports") / args.tag / "analytics"
+    out_dir = run.report_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not db_path.exists():
@@ -580,6 +577,7 @@ def main() -> None:
 
     console.print(Panel.fit(
         "[bold cyan]GM Reddit Analytics — Report[/]\n"
+        f"Tag: [dim]{run.tag}[/]\n"
         f"DB: [dim]{db_path}[/]\n"
         f"Out: [dim]{out_dir}[/]",
         border_style="cyan"
@@ -608,10 +606,9 @@ def main() -> None:
         chart_ev_vs_ice(con, out_dir)
         progress.advance(task)
 
-    con.close()
-
     md_path = write_markdown(summary, out_dir)
-    html_path = write_html_dashboard(summary, out_dir)
+    html_path = write_html_dashboard(summary, out_dir, con)
+    con.close()
 
     console.print(f"\n[green]✓[/] Report: [bold]{md_path}[/]")
     console.print(f"[green]✓[/] Dashboard: [bold]{html_path}[/]")
