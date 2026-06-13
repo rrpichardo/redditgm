@@ -11,9 +11,10 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import duckdb
 import matplotlib.pyplot as plt
@@ -33,6 +34,7 @@ os.chdir(PROJECT_ROOT)
 
 SAMPLE_DB_PATH = Path("analytics/redditgm_demo.duckdb")
 PYTHON_BIN = Path(".venv311/bin/python") if Path(".venv311/bin/python").exists() else Path(sys.executable)
+APP_TZ = ZoneInfo("America/Detroit")
 
 MODEL_PRESETS = {
     "Custom": None,
@@ -652,18 +654,250 @@ def validate_uploads(uploaded_files) -> tuple[dict[str, tuple[str, bytes, pd.Dat
     return files, summary, errors, warnings
 
 
+def read_csv_if_present(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, dtype=str, keep_default_na=False)
+
+
+def latest_run_summary(run: RunPaths) -> dict[str, Any] | None:
+    if not run.runs_dir.exists():
+        return None
+    summaries = sorted(run.runs_dir.glob("*.json"))
+    if not summaries:
+        return None
+    try:
+        return json.loads(summaries[-1].read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def latest_run_id(run: RunPaths, posts: pd.DataFrame) -> str:
+    summary = latest_run_summary(run)
+    if summary and summary.get("run_id"):
+        return str(summary["run_id"])
+    if "run_id" in posts and not posts.empty:
+        values = posts["run_id"].replace("", pd.NA).dropna()
+        if not values.empty:
+            return str(values.iloc[-1])
+    return ""
+
+
+def frame_for_run(df: pd.DataFrame, run_id_value: str) -> pd.DataFrame:
+    if df.empty or not run_id_value or "run_id" not in df:
+        return df
+    return df[df["run_id"].astype(str) == run_id_value]
+
+
+def date_range_text(df: pd.DataFrame, column: str) -> str:
+    if df.empty or column not in df:
+        return "-"
+    dates = pd.to_datetime(df[column], errors="coerce")
+    dates = dates.dropna()
+    if dates.empty:
+        return "-"
+    return f"{dates.min().date()} to {dates.max().date()}"
+
+
+def subreddit_counts(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    if df.empty or column not in df:
+        return pd.DataFrame(columns=["subreddit", "posts"])
+    return (
+        df[column]
+        .replace("", pd.NA)
+        .dropna()
+        .value_counts()
+        .rename_axis("subreddit")
+        .reset_index(name="posts")
+    )
+
+
+def csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def download_csv_button(label: str, df: pd.DataFrame, file_name: str, key: str) -> None:
+    st.download_button(
+        label,
+        data=csv_bytes(df) if not df.empty else b"",
+        file_name=file_name,
+        mime="text/csv",
+        disabled=df.empty,
+        key=key,
+        use_container_width=True,
+    )
+
+
+def preview_posts(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    columns = [
+        "created_at",
+        "subreddit",
+        "title",
+        "author",
+        "score",
+        "comment_count",
+        "content_source",
+        "content",
+        "permalink",
+    ]
+    existing = [column for column in columns if column in df.columns]
+    preview = df.loc[:, existing].copy()
+    if "created_at" in preview:
+        preview["created_at"] = pd.to_datetime(preview["created_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    return preview.head(200)
+
+
+def preview_combined(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    columns = [
+        "post_created_at",
+        "post_subreddit",
+        "post_title",
+        "post_score",
+        "post_comment_count",
+        "comment_rank",
+        "comment_score",
+        "comment_body",
+        "post_permalink",
+    ]
+    existing = [column for column in columns if column in df.columns]
+    preview = df.loc[:, existing].copy()
+    if "post_created_at" in preview:
+        preview["post_created_at"] = pd.to_datetime(preview["post_created_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    return preview.head(200)
+
+
+def render_downloaded_data(run: RunPaths) -> None:
+    st.subheader("Downloaded data")
+
+    posts = read_csv_if_present(run.data_dir / "gm_posts.csv")
+    comments = read_csv_if_present(run.data_dir / "gm_comments.csv")
+    combined = read_csv_if_present(run.data_dir / "gm_posts_with_comments.csv")
+    if posts.empty and comments.empty and combined.empty:
+        st.info("No downloaded CSVs are stored for this run yet.")
+        return
+
+    run_id_value = latest_run_id(run, posts)
+    latest_posts = frame_for_run(posts, run_id_value)
+    latest_comments = frame_for_run(comments, run_id_value)
+    latest_combined = frame_for_run(combined, run_id_value)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Latest run posts", fmt_int(len(latest_posts)))
+    m2.metric("Latest run comments", fmt_int(len(latest_comments)))
+    m3.metric("Latest combined rows", fmt_int(len(latest_combined)))
+    m4.metric("Stored posts", fmt_int(len(posts)))
+    m5.metric("Stored comments", fmt_int(len(comments)))
+
+    latest_name = run_id_value or "latest"
+    st.caption("Download CSVs")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        download_csv_button(
+            "Latest run: posts + comments",
+            latest_combined,
+            f"{run.tag}_{latest_name}_posts_with_comments.csv",
+            f"{run.tag}_{latest_name}_latest_combined",
+        )
+    with d2:
+        download_csv_button(
+            "Latest run: posts only",
+            latest_posts,
+            f"{run.tag}_{latest_name}_posts.csv",
+            f"{run.tag}_{latest_name}_latest_posts",
+        )
+    with d3:
+        download_csv_button(
+            "Latest run: comments only",
+            latest_comments,
+            f"{run.tag}_{latest_name}_comments.csv",
+            f"{run.tag}_{latest_name}_latest_comments",
+        )
+
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        download_csv_button(
+            "All stored: posts + comments",
+            combined,
+            f"{run.tag}_all_posts_with_comments.csv",
+            f"{run.tag}_all_combined",
+        )
+    with a2:
+        download_csv_button(
+            "All stored: posts only",
+            posts,
+            f"{run.tag}_all_posts.csv",
+            f"{run.tag}_all_posts",
+        )
+    with a3:
+        download_csv_button(
+            "All stored: comments only",
+            comments,
+            f"{run.tag}_all_comments.csv",
+            f"{run.tag}_all_comments",
+        )
+
+    summary = latest_run_summary(run)
+    if summary:
+        latest_rows = []
+        for item in summary.get("subreddits", []):
+            latest_rows.append({
+                "subreddit": item.get("subreddit", ""),
+                "status": item.get("status", ""),
+                "inspected": item.get("inspected_posts", 0),
+                "in_date_range": item.get("eligible_posts", item.get("new_posts", 0)),
+                "new_posts": item.get("new_posts", 0),
+                "comments": item.get("comments", 0),
+                "combined_rows": item.get("combined_rows", 0),
+            })
+        st.caption(
+            f"Latest run `{summary.get('run_id', run_id_value)}` | "
+            f"created dates {date_range_text(latest_posts, 'created_at')}"
+        )
+        if latest_rows:
+            st.dataframe(pd.DataFrame(latest_rows), width="stretch", hide_index=True)
+
+    left, right = st.columns([1, 2])
+    with left:
+        st.caption("Stored posts by subreddit")
+        st.dataframe(subreddit_counts(posts, "subreddit"), width="stretch", hide_index=True)
+    with right:
+        st.caption("Latest downloaded posts")
+        st.dataframe(
+            preview_posts(latest_posts if not latest_posts.empty else posts),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "permalink": st.column_config.LinkColumn("permalink"),
+            },
+        )
+
+    if not latest_combined.empty or not combined.empty:
+        with st.expander("Post/comment rows"):
+            st.dataframe(
+                preview_combined(latest_combined if not latest_combined.empty else combined),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "post_permalink": st.column_config.LinkColumn("post_permalink"),
+                },
+            )
+
+
 def data_page(run: RunPaths, settings: dict[str, Any]) -> None:
     st.title("Data")
+    render_on_demand_download(settings)
+    st.divider()
 
     if run.tag == "demo":
         st.info("The demo run is read-only. Choose or create a runtime tag to load new data.")
 
     status = run_status(run)
     st.markdown(
-        status_badge("DB", status["db"])
-        + status_badge("Labels", status["classify"])
-        + status_badge("Index", status["index"])
-        + status_badge("Report", status["report"]),
+        status_badge("DB", status["db"]),
         unsafe_allow_html=True,
     )
 
@@ -679,12 +913,14 @@ def data_page(run: RunPaths, settings: dict[str, Any]) -> None:
         )
         st.dataframe(counts, width="stretch", hide_index=True)
 
-    with st.form("upload_data"):
-        tag_value = st.text_input("Tag", value="gm_vehicle_on_demand" if run.tag == "demo" else run.tag)
-        uploaded = st.file_uploader("CSV", type=["csv"], accept_multiple_files=True)
-        reset = st.checkbox("Reset this run before loading", value=False)
-        st.caption("Default behavior is cumulative: append the upload into the run's master CSVs and dedupe by post/comment ID.")
-        submitted = st.form_submit_button("Append, dedupe, and load")
+    render_downloaded_data(run)
+
+    with st.expander("CSV upload"):
+        with st.form("upload_data"):
+            tag_value = st.text_input("Tag", value="gm_vehicle_on_demand" if run.tag == "demo" else run.tag)
+            uploaded = st.file_uploader("CSV", type=["csv"], accept_multiple_files=True)
+            reset = st.checkbox("Reset this run before loading", value=False)
+            submitted = st.form_submit_button("Append, dedupe, and load")
 
     if not submitted:
         return
@@ -719,6 +955,7 @@ def data_page(run: RunPaths, settings: dict[str, Any]) -> None:
     st.success(f"Loaded `{target_run.tag}` from {input_counts['mode']} input.")
     st.dataframe(pd.DataFrame(merge_stats), width="stretch", hide_index=True)
     st.dataframe(pd.DataFrame([counts]), width="stretch", hide_index=True)
+    render_downloaded_data(target_run)
 
 
 def answer_page(run: RunPaths, settings: dict[str, Any]) -> None:
@@ -787,6 +1024,166 @@ def write_subreddit_file(path_value: str, content: str) -> None:
 
 def parse_list_area(value: str) -> list[str]:
     return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def parse_subreddit_lines(value: str) -> list[str]:
+    subreddits: list[str] = []
+    seen: set[str] = set()
+    for line in value.splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        if text.lower().startswith("r/"):
+            text = text[2:]
+        text = text.strip().strip("/")
+        key = text.lower()
+        if text and key not in seen:
+            subreddits.append(text)
+            seen.add(key)
+    return subreddits
+
+
+def default_subreddit_text(settings: dict[str, Any]) -> str:
+    subreddit_lists = settings.get("subreddit_lists", {})
+    path = subreddit_lists.get("gm", "config/gm_vehicle_subreddits.txt")
+    return load_subreddit_file(path)
+
+
+def local_day_start(value: date) -> str:
+    return datetime.combine(value, time(0, 0, 0), APP_TZ).isoformat()
+
+
+def local_day_end(value: date) -> str:
+    return datetime.combine(value, time(23, 59, 59), APP_TZ).isoformat()
+
+
+def write_runtime_subreddits(run: RunPaths, subreddits: list[str]) -> Path:
+    path = run.root / "config" / "subreddits.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(subreddits) + "\n", encoding="utf-8")
+    return path
+
+
+def render_on_demand_download(settings: dict[str, Any]) -> None:
+    st.subheader("On-demand Reddit download")
+
+    today = datetime.now(APP_TZ).date()
+    default_start = today - timedelta(days=30)
+
+    with st.form("reddit_download"):
+        c1, c2, c3 = st.columns([1.1, 1, 1])
+        with c1:
+            tag_value = st.text_input(
+                "Run tag",
+                value=str(st.session_state.get("active_tag", settings.get("active_tag", "gm_vehicle_on_demand"))),
+            )
+        with c2:
+            start_date = st.date_input("Start date", value=default_start)
+        with c3:
+            end_date = st.date_input("End date", value=today)
+
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            comments_limit = st.number_input("Top comments per post", min_value=0, max_value=25, value=5, step=1)
+        with d2:
+            listing_limit = st.number_input("Posts inspected per subreddit", min_value=1, max_value=5000, value=1000, step=100)
+        with d3:
+            request_delay = st.number_input("Request delay seconds", min_value=0.0, max_value=5.0, value=0.5, step=0.1)
+
+        subreddits_text = st.text_area(
+            "Subreddits",
+            value=default_subreddit_text(settings),
+            height=190,
+        )
+
+        a1, a2 = st.columns(2)
+        with a1:
+            max_new = st.number_input("Max new posts per subreddit", min_value=0, max_value=10000, value=0, step=100)
+        with a2:
+            dry_run = st.checkbox("Dry run", value=False)
+
+        submitted = st.form_submit_button("Download Reddit data", type="primary")
+
+    if not submitted:
+        return
+
+    tag = tag_value.strip() or settings.get("active_tag", "gm_vehicle_on_demand")
+    if tag == "demo":
+        st.error("The demo run is read-only.")
+        return
+    if start_date > end_date:
+        st.error("Start date must be on or before end date.")
+        return
+
+    subreddits = parse_subreddit_lines(subreddits_text)
+    if not subreddits:
+        st.error("Add at least one subreddit.")
+        return
+
+    target_settings = load_settings()
+    target_run = RunPaths.resolve(tag, settings=target_settings)
+    subreddits_file = write_runtime_subreddits(target_run, subreddits)
+    since = local_day_start(start_date)
+    until = local_day_end(end_date)
+
+    command = [
+        str(PYTHON_BIN),
+        "collect_incremental.py",
+        "--subreddits-file",
+        str(subreddits_file),
+        "--data-dir",
+        str(target_run.data_dir),
+        "--state-file",
+        str(target_run.state_file),
+        "--runs-dir",
+        str(target_run.runs_dir),
+        "--listing-limit",
+        str(int(listing_limit)),
+        "--comments-limit",
+        str(int(comments_limit)),
+        "--request-delay",
+        str(float(request_delay)),
+        "--progress-every",
+        "100",
+        "--since-date",
+        since,
+        "--until-date",
+        until,
+    ]
+    if int(max_new) > 0:
+        command.extend(["--max-new-per-subreddit", str(int(max_new))])
+    if dry_run:
+        command.append("--dry-run")
+
+    settings_summary = {
+        "run_tag": target_run.tag,
+        "start": since,
+        "end": until,
+        "top_comments_per_post": int(comments_limit),
+        "subreddits": ", ".join(subreddits),
+        "posts_inspected_per_subreddit": int(listing_limit),
+        "request_delay_seconds": float(request_delay),
+        "state_file": str(target_run.state_file),
+    }
+    st.dataframe(pd.DataFrame([settings_summary]), width="stretch", hide_index=True)
+    st.code(" ".join(command), language="bash")
+
+    ok = run_pipeline_step(command)
+    if not ok or dry_run:
+        return
+
+    try:
+        counts = build_db(target_run.data_dir, target_run.db_path, reset=False)
+    except SystemExit:
+        st.error("DB load failed after download. Check the generated CSV files.")
+        return
+
+    target_settings["active_tag"] = target_run.tag
+    save_settings(target_settings)
+    st.session_state["active_tag"] = target_run.tag
+    st.success(f"Downloaded and loaded `{target_run.tag}`.")
+    st.dataframe(pd.DataFrame([counts]), width="stretch", hide_index=True)
+    render_downloaded_data(target_run)
 
 
 def settings_page(run: RunPaths, settings: dict[str, Any]) -> None:
@@ -1039,7 +1436,7 @@ def pipeline_page(run: RunPaths, settings: dict[str, Any]) -> None:
                 break
 
 
-def render_sidebar(settings: dict[str, Any]) -> tuple[str, str]:
+def render_sidebar(settings: dict[str, Any]) -> str:
     tags = available_tags(settings)
     session_tag = st.session_state.get("active_tag", settings.get("active_tag", tags[0]))
     if session_tag not in tags:
@@ -1047,33 +1444,21 @@ def render_sidebar(settings: dict[str, Any]) -> tuple[str, str]:
     st.sidebar.title("redditgm")
     selected_tag = st.sidebar.selectbox("Run", tags, index=tags.index(session_tag))
     st.session_state["active_tag"] = selected_tag
-    page = st.sidebar.radio("Page", ["Dashboard", "Data", "Q&A", "Settings", "Pipeline"])
-    return selected_tag, page
+    return selected_tag
 
 
 def main() -> None:
     settings = load_settings()
-    selected_tag, page = render_sidebar(settings)
+    selected_tag = render_sidebar(settings)
     run = resolve_app_run(selected_tag, settings)
 
     status = run_status(run)
     st.sidebar.markdown(
-        status_badge("DB", status["db"])
-        + status_badge("Labels", status["classify"])
-        + status_badge("Index", status["index"]),
+        status_badge("DB", status["db"]),
         unsafe_allow_html=True,
     )
 
-    if page == "Dashboard":
-        dashboard_page(run, settings)
-    elif page == "Data":
-        data_page(run, settings)
-    elif page == "Q&A":
-        answer_page(run, settings)
-    elif page == "Settings":
-        settings_page(run, settings)
-    elif page == "Pipeline":
-        pipeline_page(run, settings)
+    data_page(run, settings)
 
 
 if __name__ == "__main__":

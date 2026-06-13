@@ -8,7 +8,7 @@ import csv
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 from urllib.parse import urlparse
@@ -129,6 +129,28 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap on new posts collected per subreddit. 0 means no cap.",
     )
     parser.add_argument(
+        "--since-days",
+        type=int,
+        default=0,
+        help="Only collect posts created within the last N days. 0 means no date cutoff.",
+    )
+    parser.add_argument(
+        "--since-date",
+        default="",
+        help=(
+            "Only collect posts created on or after this ISO date or datetime. "
+            "Naive values are treated as UTC."
+        ),
+    )
+    parser.add_argument(
+        "--until-date",
+        default="",
+        help=(
+            "Only collect posts created on or before this ISO date or datetime. "
+            "Naive values are treated as UTC."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Inspect and report unseen posts without writing CSV or state.",
@@ -138,6 +160,39 @@ def parse_args() -> argparse.Namespace:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def parse_window_datetime(value: str, label: str) -> datetime:
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{label} cannot be blank")
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def date_window(args: argparse.Namespace) -> tuple[datetime | None, datetime | None]:
+    if args.since_days and args.since_date:
+        raise ValueError("Use either --since-days or --since-date, not both")
+    if args.since_days < 0:
+        raise ValueError("--since-days must be 0 or greater")
+
+    since = None
+    until = None
+    if args.since_days:
+        since = utc_now() - timedelta(days=args.since_days)
+    elif args.since_date:
+        since = parse_window_datetime(args.since_date, "--since-date")
+
+    if args.until_date:
+        until = parse_window_datetime(args.until_date, "--until-date")
+
+    if since and until and since > until:
+        raise ValueError("--since-date must be before or equal to --until-date")
+    return since, until
 
 
 def run_id() -> str:
@@ -284,6 +339,8 @@ def build_post_from_submission(submission: Any) -> dict[str, Any]:
     content = selftext or outbound_url or post_permalink
     domain = urlparse(outbound_url).netloc if outbound_url else ""
 
+    created_at = submission.created_at.astimezone()
+
     return {
         "id": getattr(submission, "id36", ""),
         "title": getattr(submission, "title", ""),
@@ -291,14 +348,47 @@ def build_post_from_submission(submission: Any) -> dict[str, Any]:
         "score": getattr(submission, "score", ""),
         "subreddit": getattr(getattr(submission, "subreddit", None), "name", ""),
         "url": post_permalink,
-        "created_at": submission.created_at.astimezone().isoformat(),
+        "created_at": created_at.isoformat(),
         "comment_count": getattr(submission, "comment_count", ""),
         "post_type": submission_post_type(submission),
         "content": content,
         "_detail_selftext": selftext,
         "_detail_outbound_url": outbound_url,
         "_detail_domain": domain,
+        "_created_at_datetime": created_at.astimezone(timezone.utc),
     }
+
+
+def post_created_at_datetime(post: dict[str, Any]) -> datetime | None:
+    created_at = post.get("_created_at_datetime")
+    if isinstance(created_at, datetime):
+        return created_at.astimezone(timezone.utc)
+
+    created_at_text = str(post.get("created_at") or "").strip()
+    if not created_at_text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(created_at_text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def post_is_in_window(
+    post: dict[str, Any],
+    since: datetime | None,
+    until: datetime | None,
+) -> bool:
+    created_at = post_created_at_datetime(post)
+    if created_at is None:
+        return False
+    if since and created_at < since:
+        return False
+    if until and created_at > until:
+        return False
+    return True
 
 
 def pull_new_posts(
@@ -509,25 +599,56 @@ def collect_subreddit(
     current_run_id: str,
     downloaded_at: str,
     data_dir: Path,
+    since: datetime | None,
+    until: datetime | None,
 ) -> dict[str, Any]:
     entry = state_entry(state, subreddit)
     seen_post_ids = set(entry["seen_post_ids"])
 
     posts = pull_new_posts(client, subreddit, args.listing_limit)
-    new_posts = [post for post in posts if post.get("id") and post["id"] not in seen_post_ids]
+    eligible_posts = [
+        post for post in posts if post_is_in_window(post, since=since, until=until)
+    ] if since or until else posts
+    older_than_start = sum(
+        1
+        for post in posts
+        if since
+        and (created_at := post_created_at_datetime(post)) is not None
+        and created_at < since
+    )
+    newer_than_end = sum(
+        1
+        for post in posts
+        if until
+        and (created_at := post_created_at_datetime(post)) is not None
+        and created_at > until
+    )
+    new_posts = [
+        post for post in eligible_posts if post.get("id") and post["id"] not in seen_post_ids
+    ]
     if args.max_new_per_subreddit > 0:
         new_posts = new_posts[: args.max_new_per_subreddit]
 
-    print(
-        f"r/{subreddit}: inspected {len(posts)} posts, {len(new_posts)} new",
-        flush=True,
-    )
+    if since or until:
+        print(
+            f"r/{subreddit}: inspected {len(posts)} posts, "
+            f"{len(eligible_posts)} in date range, {len(new_posts)} new",
+            flush=True,
+        )
+    else:
+        print(
+            f"r/{subreddit}: inspected {len(posts)} posts, {len(new_posts)} new",
+            flush=True,
+        )
 
     if args.dry_run:
         return {
             "subreddit": subreddit,
             "status": "dry_run",
             "inspected_posts": len(posts),
+            "eligible_posts": len(eligible_posts),
+            "older_than_start_posts": older_than_start,
+            "newer_than_end_posts": newer_than_end,
             "new_posts": len(new_posts),
             "comments": 0,
             "combined_rows": 0,
@@ -581,6 +702,9 @@ def collect_subreddit(
         "subreddit": subreddit,
         "status": "completed",
         "inspected_posts": len(posts),
+        "eligible_posts": len(eligible_posts),
+        "older_than_start_posts": older_than_start,
+        "newer_than_end_posts": newer_than_end,
         "new_posts": len(new_posts),
         "comments": len(comment_rows),
         "combined_rows": len(combined_rows),
@@ -595,6 +719,7 @@ def main() -> None:
         raise ValueError("--comments-limit must be 0 or greater")
     if args.request_delay < 0:
         raise ValueError("--request-delay must be 0 or greater")
+    since, until = date_window(args)
 
     subreddits_file = Path(args.subreddits_file)
     data_dir = Path(args.data_dir)
@@ -619,7 +744,16 @@ def main() -> None:
         "dry_run": args.dry_run,
         "listing_limit": args.listing_limit,
         "comments_limit": args.comments_limit,
+        "since_at": since.isoformat() if since else "",
+        "until_at": until.isoformat() if until else "",
     }
+
+    if since or until:
+        print(
+            "Using created_at window: "
+            f"{since.isoformat() if since else '-inf'} to {until.isoformat() if until else '+inf'}",
+            flush=True,
+        )
 
     for subreddit in subreddits:
         started = time.monotonic()
@@ -632,6 +766,8 @@ def main() -> None:
                 current_run_id=current_run_id,
                 downloaded_at=downloaded_at,
                 data_dir=data_dir,
+                since=since,
+                until=until,
             )
         except Exception as error:
             summary = {
