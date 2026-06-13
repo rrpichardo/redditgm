@@ -1,8 +1,10 @@
-.DS_Store
+# Secrets — never commit real keys
 .env
 .env.*
 !.env.example
 
+# Python environment & caches (machine-specific, regenerable)
+.DS_Store
 .venv/
 .venv311/
 __pycache__/
@@ -11,15 +13,5 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-data/
-state/
-runs/
-reports/
-analytics/
-*.csv
-!tests/fixtures/*.csv
-*.jsonl
-*.log
-*.duckdb
-*.faiss
-*.pkl
+# Everything else — collected data, DuckDB, FAISS index, reports — IS committed.
+# (data/, state/, runs/, reports/, analytics/, *.csv, *.duckdb, *.faiss, *.pkl)
