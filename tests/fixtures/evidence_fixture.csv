@@ -1,0 +1,21 @@
+evidence_id,source_type,run_id,subreddit,post_id,comment_id,author,created_at,title,text,permalink,score
+post_001,post,run1,Silverado,001,,user_alice,2024-01-01 10:00:00,Silverado transmission grinding,My Silverado 1500 is grinding when shifting gears. Dealer won't help.,https://reddit.com/r/Silverado/001,45
+post_002,post,run1,Silverado,002,,user_bob,2024-01-02 10:00:00,Silverado reliability issues,Had three warranty claims on my Silverado this year. Terrible reliability.,https://reddit.com/r/Silverado/002,32
+post_003,post,run1,Silverado,003,,user_alice,2024-01-03 10:00:00,Another Silverado problem,The infotainment on my Silverado keeps crashing. So frustrating.,https://reddit.com/r/Silverado/003,28
+post_004,post,run1,Silverado,004,,[deleted],2024-01-04 10:00:00,Silverado brake issues,Brakes feel spongy on my Silverado.,https://reddit.com/r/Silverado/004,12
+post_005,post,run1,GMC,005,,user_carol,2024-01-05 10:00:00,GMC Sierra disappointment,Really disappointed with my GMC Sierra. Multiple issues since purchase.,https://reddit.com/r/GMC/005,67
+post_006,post,run1,GMC,006,,user_dave,2024-01-06 10:00:00,Another GMC problem,GMC dealer service is terrible. Won't cover warranty claims.,https://reddit.com/r/GMC/006,41
+post_007,post,run1,GMC,007,,user_eve,2024-01-07 10:00:00,Love my GMC Sierra,My GMC Sierra has been rock solid. Best truck I have owned.,https://reddit.com/r/GMC/007,89
+post_008,post,run1,GMC,008,,user_frank,2024-01-08 10:00:00,GMC ride quality,The GMC Sierra ride is smooth and comfortable. Very satisfied.,https://reddit.com/r/GMC/008,54
+post_009,post,run1,Chevy,009,,user_grace,2024-01-09 10:00:00,Chevy transmission issues,My Chevrolet Silverado transmission is slipping at highway speed.,https://reddit.com/r/Chevy/009,33
+post_010,post,run1,Chevy,010,,user_henry,2024-01-10 10:00:00,Chevy transmission failure,The automatic transmission on my Chevy failed at 40k miles.,https://reddit.com/r/Chevy/010,51
+post_011,post,run1,Chevy,011,,user_iris,2024-01-11 10:00:00,Chevy trans problem again,Third time my Chevy transmission has needed service. Ridiculous.,https://reddit.com/r/Chevy/011,29
+post_012,post,run1,Chevy,012,,user_jack,2024-01-12 10:00:00,Chevy reliability,Chevy reliability has really fallen off. Two engine issues already.,https://reddit.com/r/Chevy/012,44
+post_013,post,run1,Chevy,013,,user_kate,2024-01-13 10:00:00,Chevy reliability again,Another Chevy reliability failure. Dealer service is a nightmare.,https://reddit.com/r/Chevy/013,37
+post_014,post,run1,Chevy,014,,user_leo,2024-01-14 10:00:00,Bad dealer experience Chevy,Chevy dealer service is abysmal. Three visits and still not fixed.,https://reddit.com/r/Chevy/014,22
+post_015,post,run1,Chevrolet,015,,user_mia,2024-01-15 10:00:00,Chevy Bolt EV range anxiety,My Chevy Bolt EV range is dropping fast in cold weather.,https://reddit.com/r/Chevrolet/015,56
+post_016,post,run1,Chevrolet,016,,user_noah,2024-01-16 10:00:00,Bolt EV charging issue,The DC fast charging on my Chevy Bolt EV is capped too low.,https://reddit.com/r/Chevrolet/016,48
+post_017,post,run1,Chevrolet,017,,user_olivia,2024-01-17 10:00:00,Bolt EV battery degradation,My Bolt EV battery lost 15% capacity in 2 years. EV reliability concern.,https://reddit.com/r/Chevrolet/017,39
+post_018,post,run1,Silverado,018,,user_peter,2024-01-18 10:00:00,Silverado ICE engine issue,My Silverado ICE engine is burning oil. Classic reliability problem.,https://reddit.com/r/Silverado/018,31
+post_019,post,run1,Silverado,019,,user_quinn,2024-01-19 10:00:00,Silverado ICE reliability,Silverado gas engine reliability has been terrible for me. Second failure.,https://reddit.com/r/Silverado/019,27
+post_020,post,run1,GMC,020,,user_rachel,2024-01-20 10:00:00,GMC neutral experience,Just bought my GMC Sierra. Nothing special to report yet.,https://reddit.com/r/GMC/020,15
