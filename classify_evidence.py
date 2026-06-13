@@ -148,7 +148,7 @@ def run_classify(db_path: Path, limit: int | None, source_type: str | None) -> N
     total = len(unlabeled)
     console.print(Panel.fit(
         f"[bold cyan]Classifying {total} evidence units[/]\n"
-        f"[dim]Model: {__import__('rag_core').GENERATION_MODEL}[/]",
+        f"[dim]Model: {__import__('settings').get_settings().generation_model}[/]",
         border_style="cyan"
     ))
 

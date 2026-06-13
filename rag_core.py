@@ -6,7 +6,6 @@ Ported from: Lab 3 Rating Agent (chunk/embed/FAISS/retrieve/context),
 
 from __future__ import annotations
 
-import json
 import os
 import pickle
 from pathlib import Path
