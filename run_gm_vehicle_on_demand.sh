@@ -11,9 +11,9 @@ fi
 
 .venv311/bin/python collect_incremental.py \
   --subreddits-file config/gm_vehicle_subreddits.txt \
-  --data-dir "data/${run_tag}" \
-  --state-file "state/${run_tag}_seen_posts.json" \
-  --runs-dir "runs/${run_tag}" \
+  --data-dir "runtime/${run_tag}/data" \
+  --state-file "runtime/${run_tag}/state/seen_posts.json" \
+  --runs-dir "runtime/${run_tag}/runs" \
   --listing-limit 100 \
   --comments-limit 5 \
   --request-delay 0.8 \

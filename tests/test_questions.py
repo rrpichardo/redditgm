@@ -14,6 +14,7 @@ import csv
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 import pytest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -198,3 +199,233 @@ def test_q4_ev_vs_ice_pain_counts(db):
 
     # ICE should have more pain points than EV in the fixture
     assert pain_by_powertrain["ICE"] > pain_by_powertrain["EV"]
+
+
+def test_sql_guard_rejects_file_reads_and_unknown_tables():
+    from ask import is_safe_sql
+
+    assert is_safe_sql("""
+        SELECT COUNT(*)
+        FROM evidence_units e
+        JOIN labels l ON e.evidence_id = l.evidence_id
+    """)
+    assert is_safe_sql("""
+        WITH pain AS (
+            SELECT evidence_id FROM labels WHERE is_pain_point = TRUE
+        )
+        SELECT COUNT(*) FROM pain
+    """)
+    assert not is_safe_sql("SELECT * FROM read_csv_auto('.env')")
+    assert not is_safe_sql("SELECT * FROM evidence_units; DROP TABLE labels")
+    assert not is_safe_sql("SELECT * FROM private_table")
+
+
+def test_combined_csv_ingestion_uses_distinct_post_and_comment_ids(tmp_path):
+    from build_analytics_db import build_db
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    combined_path = data_dir / "gm_posts_with_comments.csv"
+    fields = [
+        "run_id",
+        "downloaded_at",
+        "source_tool",
+        "category",
+        "time_filter",
+        "post_id",
+        "post_subreddit",
+        "post_title",
+        "post_author",
+        "post_score",
+        "post_comment_count",
+        "post_created_at",
+        "post_type",
+        "post_content_source",
+        "post_content",
+        "post_selftext",
+        "post_outbound_url",
+        "post_domain",
+        "post_permalink",
+        "comment_rank",
+        "comment_id",
+        "comment_author",
+        "comment_score",
+        "comment_body",
+        "comment_reply_count",
+        "comment_permalink",
+    ]
+    rows = [
+        {
+            "run_id": "run_1",
+            "downloaded_at": "2026-06-01T00:00:00+00:00",
+            "source_tool": "redditwarp",
+            "category": "new",
+            "time_filter": "",
+            "post_id": "p1",
+            "post_subreddit": "Silverado",
+            "post_title": "Transmission issue",
+            "post_author": "user_a",
+            "post_score": "5",
+            "post_comment_count": "2",
+            "post_created_at": "2026-06-01T00:00:00+00:00",
+            "post_type": "self",
+            "post_content_source": "selftext",
+            "post_content": "Truck is slipping.",
+            "post_selftext": "Truck is slipping.",
+            "post_outbound_url": "",
+            "post_domain": "",
+            "post_permalink": "/r/Silverado/comments/p1/",
+            "comment_rank": "1",
+            "comment_id": "c1",
+            "comment_author": "user_b",
+            "comment_score": "2",
+            "comment_body": "Same issue here.",
+            "comment_reply_count": "0",
+            "comment_permalink": "/r/Silverado/comments/p1/c1/",
+        },
+        {
+            "run_id": "run_1",
+            "downloaded_at": "2026-06-01T00:00:00+00:00",
+            "source_tool": "redditwarp",
+            "category": "new",
+            "time_filter": "",
+            "post_id": "p1",
+            "post_subreddit": "Silverado",
+            "post_title": "Transmission issue",
+            "post_author": "user_a",
+            "post_score": "5",
+            "post_comment_count": "2",
+            "post_created_at": "2026-06-01T00:00:00+00:00",
+            "post_type": "self",
+            "post_content_source": "selftext",
+            "post_content": "Truck is slipping.",
+            "post_selftext": "Truck is slipping.",
+            "post_outbound_url": "",
+            "post_domain": "",
+            "post_permalink": "/r/Silverado/comments/p1/",
+            "comment_rank": "2",
+            "comment_id": "c2",
+            "comment_author": "user_c",
+            "comment_score": "1",
+            "comment_body": "Dealer fixed mine.",
+            "comment_reply_count": "0",
+            "comment_permalink": "/r/Silverado/comments/p1/c2/",
+        },
+        {
+            "run_id": "run_1",
+            "downloaded_at": "2026-06-01T00:00:00+00:00",
+            "source_tool": "redditwarp",
+            "category": "new",
+            "time_filter": "",
+            "post_id": "p2",
+            "post_subreddit": "Chevy",
+            "post_title": "No comments post",
+            "post_author": "user_d",
+            "post_score": "3",
+            "post_comment_count": "0",
+            "post_created_at": "2026-06-02T00:00:00+00:00",
+            "post_type": "self",
+            "post_content_source": "selftext",
+            "post_content": "Just bought one.",
+            "post_selftext": "Just bought one.",
+            "post_outbound_url": "",
+            "post_domain": "",
+            "post_permalink": "/r/Chevy/comments/p2/",
+            "comment_rank": "",
+            "comment_id": "",
+            "comment_author": "",
+            "comment_score": "",
+            "comment_body": "",
+            "comment_reply_count": "",
+            "comment_permalink": "",
+        },
+    ]
+    with combined_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    counts = build_db(data_dir, tmp_path / "analytics.duckdb", reset=True)
+
+    assert counts["mode"] == "combined"
+    assert counts["input_posts"] == 2
+    assert counts["input_comments"] == 2
+    assert counts["posts"] == 2
+    assert counts["comments"] == 2
+
+
+def _combined_upload_row(post_id: str, comment_id: str = "", *, title: str | None = None) -> dict[str, str]:
+    return {
+        "run_id": "run_1",
+        "post_id": post_id,
+        "post_subreddit": "Silverado",
+        "post_title": title or f"Post {post_id}",
+        "post_author": f"author_{post_id}",
+        "post_score": "5",
+        "post_created_at": "2026-06-01T00:00:00+00:00",
+        "post_content": f"Content for {post_id}",
+        "post_selftext": f"Content for {post_id}",
+        "post_permalink": f"/r/Silverado/comments/{post_id}/",
+        "comment_rank": "1" if comment_id else "",
+        "comment_id": comment_id,
+        "comment_author": f"author_{comment_id}" if comment_id else "",
+        "comment_score": "2" if comment_id else "",
+        "comment_body": f"Comment {comment_id}" if comment_id else "",
+        "comment_permalink": f"/r/Silverado/comments/{post_id}/{comment_id}/" if comment_id else "",
+    }
+
+
+def test_cumulative_combined_upload_dedupes_overlapping_windows(tmp_path):
+    from build_analytics_db import build_db
+    from csv_store import merge_upload_frames
+
+    data_dir = tmp_path / "data"
+    db_path = tmp_path / "analytics.duckdb"
+
+    first_window = pd.DataFrame([
+        _combined_upload_row("p1", "c1"),
+        _combined_upload_row("p2"),
+    ])
+    first_stats = merge_upload_frames(
+        {"combined": ("day_1.csv", b"", first_window)},
+        data_dir,
+        reset=False,
+    )
+    first_counts = build_db(data_dir, db_path, reset=True)
+
+    second_window = pd.DataFrame([
+        _combined_upload_row("p1", "c1", title="Post p1 updated"),
+        _combined_upload_row("p1", "c2"),
+        _combined_upload_row("p3"),
+    ])
+    second_stats = merge_upload_frames(
+        {"combined": ("last_3_days.csv", b"", second_window)},
+        data_dir,
+        reset=False,
+    )
+    second_counts = build_db(data_dir, db_path, reset=False)
+    stored = pd.read_csv(data_dir / "gm_posts_with_comments.csv", dtype=str, keep_default_na=False)
+
+    assert first_stats[0]["stored_rows"] == 2
+    assert first_counts["posts"] == 2
+    assert first_counts["comments"] == 1
+
+    assert second_stats[0]["existing_rows"] == 2
+    assert second_stats[0]["incoming_rows"] == 3
+    assert second_stats[0]["stored_rows"] == 4
+    assert second_stats[0]["duplicate_rows_removed"] == 1
+    assert len(stored) == 4
+    assert second_counts["posts"] == 3
+    assert second_counts["comments"] == 2
+
+
+def test_lab_style_model_names_route_to_openrouter_by_default():
+    from rag_core import _provider_for_model
+    from settings import load_settings
+
+    settings = load_settings()
+    settings["generation_provider"] = "auto"
+
+    assert _provider_for_model("llama-4-scout", settings) == "openrouter"
+    assert _provider_for_model("gpt-oss-120b", settings) == "openrouter"
+    assert _provider_for_model("google/gemma-4-31b-it", settings) == "openrouter"
