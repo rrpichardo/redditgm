@@ -27,8 +27,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from run_config import Run
+
 console = Console()
-DB_PATH = Path("analytics/redditgm.duckdb")
 
 # Color palette — pain=red, delight=green, neutral=slate
 COLORS = {
@@ -253,13 +254,10 @@ def write_markdown(summary: dict, out_dir: Path) -> Path:
     return out
 
 
-def write_html_dashboard(summary: dict, out_dir: Path) -> Path:
+def write_html_dashboard(summary: dict, out_dir: Path, db_path: Path) -> Path:
     """Interactive dark HTML dashboard with Chart.js (animated, engaging, clear)."""
-    # Pull data for JS charts
+    # Pull data for JS charts by re-opening the DB (con was closed before this is called)
     import duckdb as _duck
-
-    # We can't pass `con` here so we re-open it — this function is called after charting
-    db_path = DB_PATH  # module-level fallback; overridden in main
 
     pain_themes_data = []
     brand_sentiment_data = {}
@@ -561,17 +559,13 @@ const anim = {{ duration: 700, easing: 'easeOutQuart' }};
 
 
 def main() -> None:
-    global DB_PATH
-
     p = argparse.ArgumentParser(description="Generate GM Reddit analytics report.")
-    p.add_argument("--db-path", default=str(DB_PATH))
     p.add_argument("--tag", default="gm_vehicle_on_demand")
     args = p.parse_args()
 
-    db_path = Path(args.db_path)
-    DB_PATH = db_path  # update module global so dashboard can re-open it
-
-    out_dir = Path("reports") / args.tag / "analytics"
+    run = Run(args.tag)
+    db_path = run.db_path
+    out_dir = run.report_dir / "analytics"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not db_path.exists():
@@ -611,7 +605,7 @@ def main() -> None:
     con.close()
 
     md_path = write_markdown(summary, out_dir)
-    html_path = write_html_dashboard(summary, out_dir)
+    html_path = write_html_dashboard(summary, out_dir, db_path)
 
     console.print(f"\n[green]✓[/] Report: [bold]{md_path}[/]")
     console.print(f"[green]✓[/] Dashboard: [bold]{html_path}[/]")
