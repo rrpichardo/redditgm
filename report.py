@@ -260,7 +260,7 @@ def write_html_dashboard(summary: dict, out_dir: Path, db_path: Path) -> Path:
     import duckdb as _duck
 
     pain_themes_data = []
-    brand_sentiment_data = {}
+    brand_rows = []
     sentiment_data = []
     ev_ice_data = []
 
