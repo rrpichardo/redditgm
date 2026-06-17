@@ -1,16 +1,13 @@
 """
 classify_evidence.py — Label each evidence_unit with structured tags via LLM.
 
-Reads unlabeled rows from evidence_units, calls the LLM per item using the
-Lab 2 analyze_review JSON shape, writes results to the labels table.
-
-Fixed theme taxonomy keeps themes comparable across runs:
-  transmission | reliability | dealer_service | pricing | infotainment |
-  battery_range | charging | build_quality | recall | warranty |
-  performance | comfort | other
+Reads unlabeled rows from evidence_units, classifies concurrently via LLM,
+writes results to the labels table. Idempotent: already-labeled rows are skipped.
 
 Run:
-  .venv311/bin/python classify_evidence.py [--limit N] [--source-type post]
+  .venv311/bin/python classify_evidence.py --tag gm
+  .venv311/bin/python classify_evidence.py --tag gm --limit 100 --source-type post
+  .venv311/bin/python classify_evidence.py --tag gm --jsonl-progress
 """
 
 from __future__ import annotations
@@ -18,51 +15,30 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import duckdb
 from json_repair import repair_json
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
 from rich.table import Table
 
 from rag_core import chat
+from run_config import Run
 
 console = Console()
-DB_PATH = Path("analytics/redditgm.duckdb")
 
-# Fixed theme enum so counts stay comparable (Lab 2 pattern)
-THEME_ENUM = [
-    "transmission", "reliability", "dealer_service", "pricing",
-    "infotainment", "battery_range", "charging", "build_quality",
-    "recall", "warranty", "performance", "comfort", "other",
-]
+MAX_WORKERS = 8
+MAX_RETRIES = 3
 
-# System prompt — Lab 2 analyze_review JSON shape
-CLASSIFIER_SYSTEM = """You are a vehicle-brand sentiment analyst for GM (General Motors).
 
-For each Reddit post/comment, output a single JSON object with exactly these fields:
-{
-  "brand": "Chevy|GMC|Cadillac|Buick|GM|unknown",
-  "model": "Silverado|Equinox|Tahoe|Sierra|Blazer|Escalade|Corvette|Camaro|<model>|unknown",
-  "powertrain": "EV|ICE|PHEV|unknown",
-  "is_pain_point": true|false,
-  "pain_theme": "transmission|reliability|dealer_service|pricing|infotainment|battery_range|charging|build_quality|recall|warranty|performance|comfort|other|null",
-  "is_delight": true|false,
-  "delight_theme": "performance|comfort|value|technology|design|safety|dealer_service|reliability|other|null",
-  "sentiment": "positive|negative|neutral|mixed",
-  "confidence": 0.0-1.0
-}
-
-Rules:
-- pain_theme must be one of the listed values or null (if is_pain_point is false)
-- delight_theme must be one of the listed values or null (if is_delight is false)
-- powertrain: EV if mentions electric/EV/battery/Bolt/Lyriq/Blazer EV; PHEV if plug-in hybrid; ICE otherwise
-- confidence: your certainty this is actually about a GM vehicle (0.0 = not sure, 1.0 = certain)
-- Output ONLY the JSON object — no explanation, no markdown fences
-"""
+def _classifier_prompt() -> str:
+    """Return the classifier system prompt from current settings taxonomy."""
+    from settings import get_settings
+    return get_settings().classifier_prompt
 
 
 def build_prompt(evidence: dict) -> str:
@@ -78,13 +54,12 @@ def classify_one(evidence: dict) -> dict | None:
     try:
         raw = chat(
             messages=[
-                {"role": "system", "content": CLASSIFIER_SYSTEM},
+                {"role": "system", "content": _classifier_prompt()},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
             max_tokens=300,
         )
-        # json-repair handles minor JSON malformations (Lab 2 parse_json_analysis)
         parsed = json.loads(repair_json(raw))
         return {
             "evidence_id": evidence["evidence_id"],
@@ -103,6 +78,17 @@ def classify_one(evidence: dict) -> dict | None:
         return None
 
 
+def classify_one_with_retry(evidence: dict) -> dict | None:
+    """Retry up to MAX_RETRIES times with exponential backoff on failure."""
+    for attempt in range(MAX_RETRIES):
+        result = classify_one(evidence)
+        if result is not None:
+            return result
+        if attempt < MAX_RETRIES - 1:
+            time.sleep(2 ** attempt)  # 1s, 2s back-off
+    return None
+
+
 def upsert_label(con: duckdb.DuckDBPyConnection, label: dict) -> None:
     con.execute("""
         INSERT INTO labels VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -119,14 +105,39 @@ def upsert_label(con: duckdb.DuckDBPyConnection, label: dict) -> None:
     ])
 
 
-def run_classify(db_path: Path, limit: int | None, source_type: str | None) -> None:
+def estimate_run(total: int, model: str) -> str:
+    """Human-readable cost/time estimate shown before starting classification."""
+    input_tokens = total * 300
+    output_tokens = total * 100
+    pricing: dict[str, tuple[float, float]] = {
+        "openai/gpt-4o-mini": (0.15, 0.60),
+        "gpt-4o-mini": (0.15, 0.60),
+        "openai/gpt-4o": (2.50, 10.00),
+        "anthropic/claude-3-5-haiku-20241022": (0.80, 4.00),
+        "claude-3-5-haiku-20241022": (0.80, 4.00),
+    }
+    in_price, out_price = pricing.get(model, (1.0, 3.0))
+    cost = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
+    minutes = (total / MAX_WORKERS) * 0.5 / 60
+    return f"~{total:,} LLM calls | ~${cost:.2f} | ~{minutes:.0f} min at {MAX_WORKERS} workers"
+
+
+def run_classify(
+    db_path: Path,
+    limit: int | None,
+    source_type: str | None,
+    jsonl_progress: bool = False,
+) -> None:
     if not db_path.exists():
-        console.print(f"[red]✗[/] Database not found at {db_path}. Run build_analytics_db.py first.")
+        msg = f"Database not found at {db_path}. Run build_analytics_db.py first."
+        if jsonl_progress:
+            print(json.dumps({"error": msg}), flush=True)
+        else:
+            console.print(f"[red]✗[/] {msg}")
         sys.exit(1)
 
     con = duckdb.connect(str(db_path))
 
-    # Only fetch rows that haven't been labeled yet
     type_filter = f"AND source_type = '{source_type}'" if source_type else ""
     limit_clause = f"LIMIT {limit}" if limit else ""
 
@@ -141,65 +152,93 @@ def run_classify(db_path: Path, limit: int | None, source_type: str | None) -> N
     """).fetchall()
 
     if not unlabeled:
-        console.print("[green]✓[/] All evidence already labeled. Nothing to do.")
+        msg = "All evidence already labeled. Nothing to do."
+        if jsonl_progress:
+            print(json.dumps({"done": True, "message": msg}), flush=True)
+        else:
+            console.print(f"[green]✓[/] {msg}")
         con.close()
         return
 
     total = len(unlabeled)
-    console.print(Panel.fit(
-        f"[bold cyan]Classifying {total} evidence units[/]\n"
-        f"[dim]Model: {__import__('settings').get_settings().generation_model}[/]",
-        border_style="cyan"
-    ))
+    evidence_list = [
+        {"evidence_id": row[0], "subreddit": row[1], "title": row[2], "text": row[3]}
+        for row in unlabeled
+    ]
+
+    from settings import get_settings
+    model = get_settings().generation_model
+    estimate = estimate_run(total, model)
+
+    if not jsonl_progress:
+        console.print(Panel.fit(
+            f"[bold cyan]Classifying {total:,} evidence units[/]\n"
+            f"[dim]Model: {model}[/]\n"
+            f"[dim]{estimate}[/]",
+            border_style="cyan",
+        ))
 
     successes = 0
     failures = 0
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Labeling...", total=total)
-
-        for row in unlabeled:
-            evidence = {
-                "evidence_id": row[0],
-                "subreddit": row[1],
-                "title": row[2],
-                "text": row[3],
-            }
-            label = classify_one(evidence)
-            if label:
-                upsert_label(con, label)
-                successes += 1
-            else:
-                failures += 1
-            progress.advance(task)
+    if jsonl_progress:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(classify_one_with_retry, e): e for e in evidence_list}
+            for i, future in enumerate(as_completed(futures), 1):
+                label = future.result()
+                if label:
+                    upsert_label(con, label)
+                    successes += 1
+                else:
+                    failures += 1
+                print(json.dumps({
+                    "progress": i,
+                    "total": total,
+                    "evidence_id": futures[future]["evidence_id"],
+                    "ok": label is not None,
+                }), flush=True)
+    else:
+        with Progress(
+            SpinnerColumn(), TextColumn("{task.description}"),
+            BarColumn(), MofNCompleteColumn(), console=console,
+        ) as progress:
+            task = progress.add_task("Labeling...", total=total)
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(classify_one_with_retry, e): e for e in evidence_list}
+                for future in as_completed(futures):
+                    label = future.result()
+                    if label:
+                        upsert_label(con, label)
+                        successes += 1
+                    else:
+                        failures += 1
+                    progress.advance(task)
 
     con.close()
 
-    # Summary
-    table = Table(title="Classification Summary", border_style="dim")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Count", justify="right", style="bold")
-    table.add_row("Labeled", str(successes), style="green")
-    table.add_row("Failed", str(failures), style="red" if failures else "dim")
-    table.add_row("Total", str(total))
-    console.print(table)
+    if not jsonl_progress:
+        table = Table(title="Classification Summary", border_style="dim")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Count", justify="right", style="bold")
+        table.add_row("Labeled", str(successes), style="green")
+        table.add_row("Failed", str(failures), style="red" if failures else "dim")
+        table.add_row("Total", str(total))
+        console.print(table)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Label evidence_units via LLM → labels table.")
-    p.add_argument("--db-path", default=str(DB_PATH))
-    p.add_argument("--limit", type=int, default=None, help="Cap labeling cost; omit for all")
-    p.add_argument("--source-type", choices=["post", "comment"], default=None,
-                   help="Label only posts or only comments (default: both)")
+    p.add_argument("--tag", default="gm_vehicle_on_demand", help="Analysis run tag")
+    p.add_argument("--db-path", default=None, help="Override DuckDB path")
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--source-type", choices=["post", "comment"], default=None)
+    p.add_argument("--jsonl-progress", action="store_true",
+                   help="Emit one JSON line per item (for Streamlit pipeline page)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_classify(Path(args.db_path), args.limit, args.source_type)
+    run = Run(args.tag)
+    db_path = Path(args.db_path) if args.db_path else run.db_path
+    run_classify(db_path, args.limit, args.source_type, jsonl_progress=args.jsonl_progress)
