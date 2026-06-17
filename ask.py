@@ -332,6 +332,10 @@ def main() -> None:
     args = p.parse_args()
 
 
+    if not args.question:
+        console.print("[yellow]Usage:[/] python ask.py \"Your question here\"")
+        sys.exit(1)
+
     console.print(Panel.fit(
         "[bold cyan]GM Reddit Analytics - Ask[/]\n"
         f"[white]{args.question}[/]",
@@ -375,35 +379,6 @@ def main() -> None:
                 source.get("permalink", ""),
             )
         console.print(source_table)
-
-
-def main() -> None:
-    p = argparse.ArgumentParser(description="Ask a plain-English question about GM Reddit data.")
-    p.add_argument("question", nargs="?", help="Your question in plain English")
-    p.add_argument("--tag", default="gm_vehicle_on_demand", help="Analysis run tag")
-    args = p.parse_args()
-
-    if not args.question:
-        console.print("[yellow]Usage:[/] python ask.py \"Your question here\"")
-        sys.exit(1)
-
-    run = Run(args.tag)
-
-    console.print(Panel.fit(
-        f"[bold cyan]GM Reddit Analytics — Ask[/]\n[white]{args.question}[/]",
-        border_style="cyan",
-    ))
-
-    try:
-        with console.status("[cyan]Analyzing...[/]"):
-            result = answer(args.question, run)
-        _display_result(result)
-    except FileNotFoundError as exc:
-        console.print(f"[red]✗[/] {exc}")
-        sys.exit(1)
-    except ValueError as exc:
-        console.print(f"[red]✗ Guardrail:[/] {exc}")
-        sys.exit(1)
 
 
 if __name__ == "__main__":

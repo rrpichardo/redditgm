@@ -1436,7 +1436,10 @@ def pipeline_page(run: RunPaths, settings: dict[str, Any]) -> None:
                 break
 
 
-def render_sidebar(settings: dict[str, Any]) -> str:
+PAGES = ["Dashboard", "Data", "Q&A", "Settings", "Pipeline"]
+
+
+def render_sidebar(settings: dict[str, Any]) -> tuple[str, str]:
     tags = available_tags(settings)
     session_tag = st.session_state.get("active_tag", settings.get("active_tag", tags[0]))
     if session_tag not in tags:
@@ -1444,21 +1447,33 @@ def render_sidebar(settings: dict[str, Any]) -> str:
     st.sidebar.title("redditgm")
     selected_tag = st.sidebar.selectbox("Run", tags, index=tags.index(session_tag))
     st.session_state["active_tag"] = selected_tag
-    return selected_tag
+    page = st.sidebar.radio("Page", PAGES, label_visibility="collapsed")
+    return selected_tag, page
 
 
 def main() -> None:
     settings = load_settings()
-    selected_tag = render_sidebar(settings)
+    selected_tag, page = render_sidebar(settings)
     run = resolve_app_run(selected_tag, settings)
 
     status = run_status(run)
     st.sidebar.markdown(
-        status_badge("DB", status["db"]),
+        status_badge("DB", status["db"])
+        + status_badge("Labels", status["classify"])
+        + status_badge("Index", status["index"]),
         unsafe_allow_html=True,
     )
 
-    data_page(run, settings)
+    if page == "Dashboard":
+        dashboard_page(run, settings)
+    elif page == "Data":
+        data_page(run, settings)
+    elif page == "Q&A":
+        answer_page(run, settings)
+    elif page == "Settings":
+        settings_page(run, settings)
+    elif page == "Pipeline":
+        pipeline_page(run, settings)
 
 
 if __name__ == "__main__":
